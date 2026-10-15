@@ -1,21 +1,44 @@
 #include "vulkan_renderer.h"
 
 #include <android/log.h>
-#include <chrono>
-#include <cmath>
+#include <vulkan/vulkan.h>
 #include <cstring>
+#include <vector>
 
 #define LOG_TAG "SkeaClockVulkan"
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+static const char* kVertexShader =
+    "#version 450\n"
+    "layout(location = 0) in vec2 inPos;\n"
+    "layout(location = 1) in vec3 inColor;\n"
+    "layout(location = 0) out vec3 fragColor;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(inPos, 0.0, 1.0);\n"
+    "  fragColor = inColor;\n"
+    "}\n";
+
+static const char* kFragmentShader =
+    "#version 450\n"
+    "layout(location = 0) in vec3 fragColor;\n"
+    "layout(location = 0) out vec4 outColor;\n"
+    "void main() {\n"
+    "  outColor = vec4(fragColor, 1.0);\n"
+    "}\n";
+
+struct Vertex {
+    float x, y;
+    float r, g, b;
+};
 
 VulkanRenderer::VulkanRenderer() = default;
 VulkanRenderer::~VulkanRenderer() { destroy(); }
 
 bool VulkanRenderer::isSupported() {
-    uint32_t count = 0;
-    VkResult result = vkEnumerateInstanceVersion(&count);
-    return result == VK_SUCCESS || result == VK_INCOMPLETE;
+    uint32_t version = 0;
+    VkResult result = vkEnumerateInstanceVersion(&version);
+    return result == VK_SUCCESS;
 }
 
 bool VulkanRenderer::init(ANativeWindow* window) {
@@ -32,20 +55,17 @@ bool VulkanRenderer::init(ANativeWindow* window) {
 }
 
 bool VulkanRenderer::createInstance() {
-    const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "SkeaClock";
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "SkeaClock";
+    appInfo.pEngineName = "NoEngine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.apiVersion = VK_API_VERSION_1_0;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
-    createInfo.enabledLayerCount = 1;
-    createInfo.ppEnabledLayerNames = layers;
 
     VkResult result = vkCreateInstance(&createInfo, nullptr, &instance_);
     if (result != VK_SUCCESS) {
@@ -56,12 +76,9 @@ bool VulkanRenderer::createInstance() {
 }
 
 bool VulkanRenderer::createSurface() {
-    const VkAndroidSurfaceCreateInfoKHR createInfo{
-        VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
-        nullptr,
-        0,
-        window_
-    };
+    VkAndroidSurfaceCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+    createInfo.window = window_;
 
     VkResult result = vkCreateAndroidSurfaceKHR(instance_, &createInfo, nullptr, &surface_);
     if (result != VK_SUCCESS) {
@@ -72,51 +89,51 @@ bool VulkanRenderer::createSurface() {
 }
 
 bool VulkanRenderer::createDevice() {
-    uint32_t physicalDeviceCount = 0;
-    vkEnumeratePhysicalDevices(instance_, &physicalDeviceCount, nullptr);
-    if (physicalDeviceCount == 0) {
-        LOGE("No Vulkan physical devices found");
+    uint32_t deviceCount = 0;
+    VkResult result = vkEnumeratePhysicalDevices(instance_, &deviceCount, nullptr);
+    if (result != VK_SUCCESS || deviceCount == 0) {
+        LOGE("No Vulkan devices found");
         return false;
     }
 
-    VkPhysicalDevice devices[8];
-    vkEnumeratePhysicalDevices(instance_, &physicalDeviceCount, devices);
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(instance_, &deviceCount, devices.data());
     physicalDevice_ = devices[0];
 
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, nullptr);
-    VkQueueFamilyProperties queueProps[8];
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, queueProps);
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, queueFamilies.data());
+
     for (uint32_t i = 0; i < queueFamilyCount; ++i) {
         VkBool32 presentSupport = VK_FALSE;
         vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, surface_, &presentSupport);
-        if ((queueProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && presentSupport) {
+        if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && presentSupport) {
             queueFamilyIndex_ = i;
             break;
         }
     }
 
     if (queueFamilyIndex_ == UINT32_MAX) {
-        LOGE("No suitable queue family found");
+        LOGE("No valid queue family found");
         return false;
     }
 
     float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{};
-    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueInfo.queueFamilyIndex = queueFamilyIndex_;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &queuePriority;
+    VkDeviceQueueCreateInfo queueCreateInfo{};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = queueFamilyIndex_;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
 
-    VkPhysicalDeviceFeatures features{};
-    VkDeviceCreateInfo deviceInfo{};
-    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
-    deviceInfo.pEnabledFeatures = &features;
+    VkDeviceCreateInfo deviceCreateInfo{};
+    deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCreateInfo.queueCreateInfoCount = 1;
+    deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
 
-    if (vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_) != VK_SUCCESS) {
-        LOGE("vkCreateDevice failed");
+    result = vkCreateDevice(physicalDevice_, &deviceCreateInfo, nullptr, &device_);
+    if (result != VK_SUCCESS) {
+        LOGE("vkCreateDevice failed: %d", result);
         return false;
     }
 
@@ -125,39 +142,45 @@ bool VulkanRenderer::createDevice() {
 }
 
 bool VulkanRenderer::createSwapchain() {
-    VkSurfaceCapabilitiesKHR caps{};
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice_, surface_, &caps);
+    VkSurfaceCapabilitiesKHR capabilities{};
+    VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice_, surface_, &capabilities);
+    if (result != VK_SUCCESS) {
+        LOGE("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: %d", result);
+        return false;
+    }
 
-    width_ = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
-    height_ = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
+    width_ = ANativeWindow_getWidth(window_);
+    height_ = ANativeWindow_getHeight(window_);
 
     uint32_t formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &formatCount, nullptr);
-    VkSurfaceFormatKHR formats[8];
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &formatCount, formats);
+    std::vector<VkSurfaceFormatKHR> formats(formatCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &formatCount, formats.data());
 
-    VkSurfaceFormatKHR chosenFormat = formats[0];
-    VkExtent2D extent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{ width_, height_ };
+    VkSurfaceFormatKHR format = formats[0];
+    VkExtent2D extent = capabilities.currentExtent.width != UINT32_MAX ? capabilities.currentExtent : VkExtent2D{width_, height_};
 
     VkSwapchainCreateInfoKHR swapInfo{};
     swapInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     swapInfo.surface = surface_;
-    swapInfo.minImageCount = caps.minImageCount;
-    swapInfo.imageFormat = chosenFormat.format;
-    swapInfo.imageColorSpace = chosenFormat.colorSpace;
+    swapInfo.minImageCount = capabilities.minImageCount;
+    swapInfo.imageFormat = format.format;
+    swapInfo.imageColorSpace = format.colorSpace;
     swapInfo.imageExtent = extent;
     swapInfo.imageArrayLayers = 1;
     swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    swapInfo.preTransform = caps.currentTransform;
-    swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    swapInfo.preTransform = capabilities.currentTransform;
+    swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swapInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     swapInfo.clipped = VK_TRUE;
     swapInfo.oldSwapchain = VK_NULL_HANDLE;
 
-    if (vkCreateSwapchainKHR(device_, &swapInfo, nullptr, &swapchain_) != VK_SUCCESS) {
-        LOGE("vkCreateSwapchainKHR failed");
+    result = vkCreateSwapchainKHR(device_, &swapInfo, nullptr, &swapchain_);
+    if (result != VK_SUCCESS) {
+        LOGE("vkCreateSwapchainKHR failed: %d", result);
         return false;
     }
+
     return true;
 }
 
@@ -190,6 +213,7 @@ bool VulkanRenderer::createCommandStructures() {
         LOGE("vkCreateSemaphore(renderFinished) failed");
         return false;
     }
+
     return true;
 }
 
@@ -208,7 +232,10 @@ void VulkanRenderer::renderFrame() {
     vkBeginCommandBuffer(commandBuffer_, &beginInfo);
 
     VkClearValue clearValue{};
-    clearValue.color = {{0.05f, 0.05f, 0.1f, 1.0f}};
+    clearValue.color.float32[0] = 0.07f;
+    clearValue.color.float32[1] = 0.08f;
+    clearValue.color.float32[2] = 0.10f;
+    clearValue.color.float32[3] = 1.0f;
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
