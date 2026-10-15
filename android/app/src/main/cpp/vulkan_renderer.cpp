@@ -224,11 +224,13 @@ bool VulkanRenderer::createRenderPass() {
     rpInfo.subpassCount = 1;
     rpInfo.pSubpasses = &subpass;
 
-    VkResult result = vkCreateRenderPass(device_, &rpInfo, nullptr, &rpInfo.renderPass);
-    // Mistake: rpInfo.renderPass doesn't exist. We'll create a local VkRenderPass variable instead.
-    // Fix below by creating a VkRenderPass local and storing in member if necessary.
-    // For now return true to allow build; will fix by actually creating member later.
-    (void)result;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkResult result = vkCreateRenderPass(device_, &rpInfo, nullptr, &renderPass);
+    if (result != VK_SUCCESS) {
+        LOGE("vkCreateRenderPass failed: %d", result);
+        return false;
+    }
+    renderPass_ = renderPass;
     return true;
 }
 
@@ -238,7 +240,7 @@ bool VulkanRenderer::createFramebuffers() {
         VkImageView attachments[1] = { swapchainImageViews_[i] };
         VkFramebufferCreateInfo fbInfo{};
         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fbInfo.renderPass = VK_NULL_HANDLE; // placeholder, should be the created render pass
+        fbInfo.renderPass = renderPass_;
         fbInfo.attachmentCount = 1;
         fbInfo.pAttachments = attachments;
         fbInfo.width = width_;
@@ -314,15 +316,7 @@ void VulkanRenderer::renderFrame() {
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    // Use the first render pass / framebuffer we created
-    // For now placeholders are used; if real render pass/framebuffers exist, set them here.
-    if (framebuffers_.empty()) {
-        LOGE("No framebuffers available");
-        vkEndCommandBuffer(commandBuffer_);
-        return;
-    }
-    // rpInfo.renderPass should be actual render pass handle; skipped here for minimal clear
-    rpInfo.renderPass = VK_NULL_HANDLE;
+    rpInfo.renderPass = renderPass_;
     rpInfo.framebuffer = framebuffers_[imageIndex];
     rpInfo.renderArea.offset = {0, 0};
     rpInfo.renderArea.extent = {width_, height_};
@@ -330,7 +324,7 @@ void VulkanRenderer::renderFrame() {
     rpInfo.pClearValues = &clearValue;
 
     vkCmdBeginRenderPass(commandBuffer_, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-    // (No draw calls yet)
+    // (No draw calls yet) - we clear the background. Further draw calls (circle/lines) will be added later.
     vkCmdEndRenderPass(commandBuffer_);
 
     if (vkEndCommandBuffer(commandBuffer_) != VK_SUCCESS) {
@@ -338,11 +332,11 @@ void VulkanRenderer::renderFrame() {
         return;
     }
 
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = &imageAvailableSemaphore_;
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     submitInfo.pWaitDstStageMask = waitStages;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer_;
@@ -388,6 +382,7 @@ void VulkanRenderer::destroy() {
     if (commandPool_ != VK_NULL_HANDLE) vkDestroyCommandPool(device_, commandPool_, nullptr);
     if (device_ != VK_NULL_HANDLE) vkDestroyDevice(device_, nullptr);
     if (surface_ != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    if (renderPass_ != VK_NULL_HANDLE) vkDestroyRenderPass(device_, renderPass_, nullptr);
     if (instance_ != VK_NULL_HANDLE) vkDestroyInstance(instance_, nullptr);
 
     initialized_ = false;
