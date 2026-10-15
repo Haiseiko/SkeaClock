@@ -3,6 +3,7 @@
 #include <android/native_window.h>
 #include <vulkan/vulkan.h>
 #include <cstdint>
+#include <vector>
 
 class VulkanRenderer {
 public:
@@ -10,6 +11,7 @@ public:
     ~VulkanRenderer();
 
     static bool isSupported();
+
     bool init(ANativeWindow* window);
     void renderFrame();
     void destroy();
@@ -20,6 +22,9 @@ private:
     bool createSurface();
     bool createDevice();
     bool createSwapchain();
+    bool createImageViews();
+    bool createRenderPass();
+    bool createFramebuffers();
     bool createCommandStructures();
 
     ANativeWindow* window_ = nullptr;
@@ -33,6 +38,11 @@ private:
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
     VkSemaphore imageAvailableSemaphore_ = VK_NULL_HANDLE;
     VkSemaphore renderFinishedSemaphore_ = VK_NULL_HANDLE;
+
+    std::vector<VkImage> swapchainImages_;
+    std::vector<VkImageView> swapchainImageViews_;
+    std::vector<VkFramebuffer> framebuffers_;
+    VkFormat swapchainImageFormat_ = VK_FORMAT_UNDEFINED;
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;
