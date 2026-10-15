@@ -1,0 +1,102 @@
+name: Android build and release
+
+on:
+  push:
+    branches: [ 'android-port' ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install Android SDK command-line tools
+        run: |
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          cd $ANDROID_SDK_ROOT/cmdline-tools
+          curl -o commandlinetools.zip https://dl.google.com/android/repository/commandlinetools-linux-9123335_latest.zip
+          unzip commandlinetools.zip
+          rm commandlinetools.zip
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
+          mv cmdline-tools/* $ANDROID_SDK_ROOT/cmdline-tools/latest/
+
+      - name: Install SDK packages
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platform-tools" "platforms;android-31" "build-tools;31.0.0" "ndk;21.4.7075529"
+
+      - name: Add SDK tools to PATH
+        run: |
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+
+      - name: Grant execute for gradlew
+        run: chmod +x android/gradlew
+
+      - name: Setup keystore (from Secrets)
+        if: secrets.KEYSTORE_BASE64 != ''
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
+          cat > android/keystore.properties <<EOF
+          storeFile=app/keystore.jks
+          storePassword=${KEYSTORE_PASSWORD}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PASSWORD}
+          EOF
+
+      - name: Build APK (Release)
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkeaClock-apk
+          path: android/app/build/outputs/apk/release/*.apk
+
+      - name: Find built APK
+        id: find_apk
+        run: |
+          set -e
+          echo "Looking for APK in android/app/build/outputs/apk/release/"
+          ls -la android/app/build/outputs/apk/release || true
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n1 || true)
+          if [ -z "$APK" ]; then echo "no_apk=true" >> $GITHUB_OUTPUT; exit 0; fi
+          echo "found=$APK" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release (if tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: Automated build of APK
+          draft: false
+          prerelease: false
+
+      - name: Upload APK to Release
+        if: steps.create_release.outputs.upload_url != '' && steps.find_apk.outputs.found != ''
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.find_apk.outputs.found }}
+          asset_name: SkeaClock-${{ github.ref_name }}.apk
+          asset_content_type: application/vnd.android.package-archive
